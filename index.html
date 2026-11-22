@@ -68,7 +68,7 @@
             border-radius: 0.25rem;
             padding: 0 0.25rem;
             box-shadow: 0 0 8px rgba(212, 175, 55, 0.5);
-            transition: all 0.2s ease-in-out;
+            transition: all 0.1s ease-in-out;
             transform: scale(1.05);
             display: inline-block;
         }
@@ -174,7 +174,7 @@
                         <span id="cardCategoryBadge" class="bg-yiddish-gold/20 text-yiddish-dark border border-yiddish-gold/40 px-2.5 py-0.5 rounded-full font-semibold">
                             החיים
                         </span>
-                        <span id="cardCounter" class="font-mono font-bold">1 / 35</span>
+                        <span id="cardCounter" class="font-mono font-bold">1 / 45</span>
                         <button onclick="toggleBookmark(event)" id="bookmarkBtn" title="שמור במועדפים" class="w-7 h-7 sm:w-8 sm:h-8 rounded-full flex items-center justify-center text-base sm:text-lg text-gray-300 hover:text-yiddish-gold transition">
                             <i class="fa-solid fa-bookmark"></i>
                         </button>
@@ -340,7 +340,7 @@
             <div class="space-y-3 text-xs leading-relaxed">
                 <div class="flex items-start gap-2">
                     <i class="fa-solid fa-volume-high text-yiddish-red mt-0.5 text-sm"></i>
-                    <p><strong>קול של סבתא:</strong> לחץ על כפתור השמע כדי לשמוע את סבתא שרה מקריאה את הפתגם ביידיש (Gemini AI TTS בקול נשי חם ומבוגר).</p>
+                    <p><strong>קול של סבתא:</strong> לחץ על כפתור השמע כדי לשמוע את סבתא שרה מקריאה את הפתגם ביידיש עם סנכרון קריוקי חי.</p>
                 </div>
 
                 <div class="flex items-start gap-2">
@@ -404,7 +404,7 @@
     <!-- Application Logic & Data -->
     <script>
         /* -------------------------------------------------------------
-           1. CARD DATA (All 35 Yiddish Cards with "מתי שולפים")
+           1. CARD DATA (All 45 Yiddish Cards)
            ------------------------------------------------------------- */
         const cardsData = [
             {
@@ -867,20 +867,7 @@
         let currentIndex = 0;
         let isFlipped = false;
         let isQuizMode = false;
-        let audioCache = {}; // Cache generated Audio URLs
         let isAudioPlaying = false;
-        let activeAudioObject = null;
-        let activeKaraokeTimer = null;
-
-        // Preload Web Speech API voices reliably (essential for desktop Chrome/Edge)
-        let cachedSystemVoices = [];
-        if ('speechSynthesis' in window) {
-            const loadVoices = () => {
-                cachedSystemVoices = window.speechSynthesis.getVoices();
-            };
-            loadVoices();
-            window.speechSynthesis.onvoiceschanged = loadVoices;
-        }
 
         // User stats saved in localStorage
         let userStats = JSON.parse(localStorage.getItem('sarahGameStats')) || {
@@ -894,258 +881,182 @@
         if (!Array.isArray(userStats.deletedIds)) userStats.deletedIds = [];
 
         /* -------------------------------------------------------------
-           3. AUDIO SYNTHESIS ENGINE (Gemini API + Desktop-Safe Fallback)
+           3. AUDIO SYNTHESIS ENGINE (Optimized Local Web Speech API)
            ------------------------------------------------------------- */
-        async function playAudio(event) {
-            if (event) event.stopPropagation();
+        let cachedSystemVoices = [];
+        let activeKaraokeRaf = null;
+        let currentUtterance = null; // מונע מ-Garbage Collector של כרום לקטוע הקראה באמצע
 
-            // Stop any currently playing audio
+        if ('speechSynthesis' in window) {
+            const loadVoices = () => {
+                cachedSystemVoices = window.speechSynthesis.getVoices();
+            };
+            loadVoices();
+            window.speechSynthesis.onvoiceschanged = loadVoices;
+        }
+
+        function playAudio(event) {
+            if (event) event.stopPropagation();
             stopCurrentAudio();
 
             const card = filteredCards[currentIndex];
             if (!card) return;
 
-            isAudioPlaying = true;
-            setAudioLoadingState(true);
-
-            try {
-                let audioUrl = audioCache[card.id];
-                let durationSec = 0;
-
-                if (!audioUrl) {
-                    audioUrl = await fetchGeminiTTS(card);
-                    if (audioUrl) {
-                        audioCache[card.id] = audioUrl;
-                    }
-                }
-
-                if (audioUrl && isAudioPlaying) {
-                    const audio = new Audio(audioUrl);
-                    activeAudioObject = audio;
-
-                    audio.onloadedmetadata = () => {
-                        durationSec = audio.duration || 4;
-                    };
-
-                    audio.onplay = () => {
-                        updateAudioUI(true);
-                        startSyllableKaraoke(card.yiddish, (audio.duration || 4) * 1000);
-                    };
-
-                    audio.onended = () => {
-                        stopCurrentAudio();
-                    };
-
-                    audio.onerror = () => {
-                        speakLocalFallback(card);
-                    };
-
-                    await audio.play();
-                    return;
-                }
-            } catch (err) {
-                console.warn("Gemini TTS fallback triggered:", err);
-            }
-
-            if (isAudioPlaying) {
-                speakLocalFallback(card);
-            }
-        }
-
-        function stopCurrentAudio() {
-            isAudioPlaying = false;
-            if (activeAudioObject) {
-                try {
-                    activeAudioObject.pause();
-                    activeAudioObject.currentTime = 0;
-                } catch (e) {}
-                activeAudioObject = null;
-            }
-            if ('speechSynthesis' in window) {
-                try {
-                    window.speechSynthesis.cancel();
-                } catch (e) {}
-            }
-            if (activeKaraokeTimer) {
-                clearInterval(activeKaraokeTimer);
-                activeKaraokeTimer = null;
-            }
-            resetKaraokeHighlight();
-            updateAudioUI(false);
-        }
-
-        async function fetchGeminiTTS(card) {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-            try {
-                const promptText = `Speak in a lively, theatrical, slightly raspy elderly Polish-Ashkenazi grandmother voice (around 80 years old), at a brisk, expressive storytelling pace with authentic Polish-Yiddish melody and emphasis. Read this Yiddish proverb naturally: "${card.yiddish}" (pronounced: ${card.phonetic})`;
-
-                const payload = {
-                    contents: [{
-                        parts: [{ text: promptText }]
-                    }],
-                    generationConfig: {
-                        responseModalities: ["AUDIO"],
-                        speechConfig: {
-                            voiceConfig: {
-                                prebuiltVoiceConfig: { voiceName: "Gacrux" }
-                            }
-                        }
-                    },
-                    model: "gemini-2.5-flash-preview-tts"
-                };
-
-                const apiKey = "";
-                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
-
-                const response = await fetch(apiUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                    signal: controller.signal
-                });
-
-                clearTimeout(timeoutId);
-                if (!response.ok) return null;
-
-                const result = await response.json();
-                const part = result?.candidates?.[0]?.content?.parts?.[0];
-                const audioData = part?.inlineData?.data;
-                const mimeType = part?.inlineData?.mimeType;
-
-                if (audioData && mimeType && mimeType.startsWith("audio/")) {
-                    const rateMatch = mimeType.match(/rate=(\d+)/);
-                    const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
-                    const pcmBuffer = base64ToArrayBuffer(audioData);
-                    const pcm16 = new Int16Array(pcmBuffer);
-                    const wavBlob = pcmToWav(pcm16, sampleRate);
-                    return URL.createObjectURL(wavBlob);
-                }
-            } catch (e) {
-                clearTimeout(timeoutId);
-            }
-            return null;
-        }
-
-        function speakLocalFallback(card) {
             if (!('speechSynthesis' in window)) {
-                stopCurrentAudio();
                 showToast("הדפדפן אינו תומך בהקראה קולית");
                 return;
             }
+
+            isAudioPlaying = true;
+            setAudioLoadingState(true);
 
             try {
                 window.speechSynthesis.cancel();
             } catch (e) {}
 
-            // Convert Yiddish Kamatz & silent endings for clearer local Hebrew TTS reading
-            const phoneticHebrew = card.yiddish
+            setTimeout(() => {
+                if (!isAudioPlaying) return;
+                speakYiddishDramatic(card);
+            }, 60);
+        }
+
+        function selectGrandmaVoice() {
+            const voices = cachedSystemVoices.length ? cachedSystemVoices : window.speechSynthesis.getVoices();
+            
+            const isMale = (v) => /\b(asaf|danny|guy|avi|david|alon|oded|male|man|boy)\b|גבר|דני|אסף|אבי|דוד/i.test(v.name);
+            const isFemale = (v) => /\b(carmit|hila|maya|noa|yael|tamar|sara|female|woman|girl|zira|samantha|victoria|google.*hebrew)\b|אישה|כרמית|הילה|מאיה|נועה|יעל/i.test(v.name);
+
+            const hebrewVoices = voices.filter(v => v.lang && (v.lang.toLowerCase().includes('he') || v.lang.toLowerCase().includes('iw')));
+            const nonMaleHebrew = hebrewVoices.filter(v => !isMale(v));
+
+            return (
+                nonMaleHebrew.find(v => isFemale(v)) ||
+                nonMaleHebrew[0] ||
+                voices.find(v => v.lang && v.lang.toLowerCase().includes('pl') && !isMale(v)) ||
+                voices.find(v => isFemale(v)) ||
+                voices.find(v => !isMale(v)) ||
+                null
+            );
+        }
+
+        function prepareTheatricalYiddish(yiddishText) {
+            let phonetic = yiddishText
                 .replace(/אָ/g, 'וֹ')
                 .replace(/ע\b/g, 'ה')
                 .replace(/ייַ/g, 'אַי')
-                .replace(/יי/g, 'אֵי');
+                .replace(/יי/g, 'אֵי')
+                .replace(/וו/g, 'ו')
+                .replace(/פֿ/g, 'פ')
+                .replace(/בֿ/g, 'ו');
 
-            const utterance = new SpeechSynthesisUtterance(phoneticHebrew);
-            utterance.lang = 'he-IL';
-            utterance.rate = 0.96;
-            utterance.pitch = 0.88;
+            phonetic = phonetic
+                .replace(/\s–\s/g, '... ! ')
+                .replace(/,\s/g, ', ');
 
-            const voices = cachedSystemVoices.length ? cachedSystemVoices : window.speechSynthesis.getVoices();
-            const isMaleVoice = (name) => /asaf|danny|guy|avi|david|male|גבר|דני|אסף/i.test(name);
-            const isFemaleVoice = (name) => /carmit|hila|maya|noa|female|אישה|כרמית|הילה/i.test(name);
+            if (!/[!?]$/.test(phonetic.trim())) {
+                phonetic = phonetic.trim() + '!';
+            }
+            return phonetic;
+        }
 
-            const hebrewVoices = voices.filter(v => v.lang && (v.lang.includes('he') || v.lang.includes('iw')));
-            const selectedVoice =
-                hebrewVoices.find(v => isFemaleVoice(v.name)) ||
-                hebrewVoices.find(v => !isMaleVoice(v.name)) ||
-                voices.find(v => isFemaleVoice(v.name));
+        function speakYiddishDramatic(card) {
+            const theatricalText = prepareTheatricalYiddish(card.yiddish);
+            const utterance = new SpeechSynthesisUtterance(theatricalText);
+            currentUtterance = utterance;
 
+            const selectedVoice = selectGrandmaVoice();
             if (selectedVoice) {
                 utterance.voice = selectedVoice;
+                utterance.lang = selectedVoice.lang || 'he-IL';
+            } else {
+                utterance.lang = 'he-IL';
             }
 
-            const estimatedDurationMs = Math.max(2200, card.yiddish.split(/\s+/).length * 480);
+            utterance.rate = 1.18;
+            utterance.pitch = 0.78;
+            utterance.volume = 1.0;
+
+            const words = card.yiddish.split(/\s+/);
+            const estimatedDurationMs = Math.max(1600, words.length * 360);
+            let boundaryTriggered = false;
 
             utterance.onstart = () => {
+                if (!isAudioPlaying) return;
                 updateAudioUI(true);
-                startSyllableKaraoke(card.yiddish, estimatedDurationMs);
+                startSmoothKaraoke(card.yiddish, estimatedDurationMs, () => boundaryTriggered);
+            };
+
+            utterance.onboundary = (event) => {
+                if (event.name === 'word' && isAudioPlaying) {
+                    boundaryTriggered = true;
+                    const textUpToChar = theatricalText.slice(0, event.charIndex);
+                    const spokenWordsCount = textUpToChar.trim() ? textUpToChar.trim().split(/\s+/).length : 0;
+                    const targetIdx = Math.min(words.length - 1, spokenWordsCount);
+                    highlightWordAtIndex(targetIdx);
+                }
             };
 
             utterance.onend = () => {
+                currentUtterance = null;
                 stopCurrentAudio();
             };
 
-            utterance.onerror = () => {
+            utterance.onerror = (e) => {
+                console.warn("Speech error:", e);
+                currentUtterance = null;
                 stopCurrentAudio();
             };
 
             window.speechSynthesis.speak(utterance);
         }
 
-        function base64ToArrayBuffer(base64) {
-            const binaryString = atob(base64);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
+        function stopCurrentAudio() {
+            isAudioPlaying = false;
+            currentUtterance = null;
+            if ('speechSynthesis' in window) {
+                try {
+                    window.speechSynthesis.cancel();
+                } catch (e) {}
             }
-            return bytes.buffer;
-        }
-
-        function pcmToWav(pcm16Samples, sampleRate) {
-            const numChannels = 1;
-            const bytesPerSample = 2;
-            const blockAlign = numChannels * bytesPerSample;
-            const byteRate = sampleRate * blockAlign;
-            const dataSize = pcm16Samples.length * bytesPerSample;
-            const buffer = new ArrayBuffer(44 + dataSize);
-            const view = new DataView(buffer);
-
-            const writeString = (offset, str) => {
-                for (let i = 0; i < str.length; i++) {
-                    view.setUint8(offset + i, str.charCodeAt(i));
-                }
-            };
-
-            writeString(0, 'RIFF');
-            view.setUint32(4, 36 + dataSize, true);
-            writeString(8, 'WAVE');
-            writeString(12, 'fmt ');
-            view.setUint32(16, 16, true);
-            view.setUint16(20, 1, true);
-            view.setUint16(22, numChannels, true);
-            view.setUint32(24, sampleRate, true);
-            view.setUint32(28, byteRate, true);
-            view.setUint16(32, blockAlign, true);
-            view.setUint16(34, 16, true);
-            writeString(36, 'data');
-            view.setUint32(40, dataSize, true);
-
-            let offset = 44;
-            for (let i = 0; i < pcm16Samples.length; i++, offset += 2) {
-                view.setInt16(offset, pcm16Samples[i], true);
+            if (activeKaraokeRaf) {
+                cancelAnimationFrame(activeKaraokeRaf);
+                activeKaraokeRaf = null;
             }
-
-            return new Blob([view], { type: 'audio/wav' });
+            resetKaraokeHighlight();
+            updateAudioUI(false);
         }
 
         /* -------------------------------------------------------------
-           4. SYLLABLE-WEIGHTED KARAOKE HIGHLIGHTING
+           4. HYBRID KARAOKE HIGHLIGHTING (Boundary + Smooth RAF)
            ------------------------------------------------------------- */
         function renderYiddishWithSpans(text) {
             const words = text.split(/\s+/);
-            return words.map((word, idx) => `<span class="karaoke-word inline-block mx-1 transition-all duration-150" data-word-idx="${idx}">${word}</span>`).join(' ');
+            return words.map((word, idx) => `<span class="karaoke-word inline-block mx-1 transition-all duration-100" data-word-idx="${idx}">${word}</span>`).join(' ');
         }
 
-        function startSyllableKaraoke(text, totalDurationMs) {
-            if (activeKaraokeTimer) clearInterval(activeKaraokeTimer);
+        function highlightWordAtIndex(index) {
+            const wordElements = document.querySelectorAll('#yiddishText .karaoke-word');
+            wordElements.forEach((el, i) => {
+                if (i === index) {
+                    el.classList.add('word-highlight');
+                } else {
+                    el.classList.remove('word-highlight');
+                }
+            });
+        }
+
+        function startSmoothKaraoke(text, totalDurationMs, isBoundaryActiveFn) {
+            if (activeKaraokeRaf) cancelAnimationFrame(activeKaraokeRaf);
 
             const wordElements = document.querySelectorAll('#yiddishText .karaoke-word');
             if (!wordElements.length) return;
 
             const words = Array.from(wordElements).map(el => el.innerText);
-            const weights = words.map(w => Math.max(2, w.replace(/[\u0591-\u05C7]/g, '').length));
+            const weights = words.map(w => {
+                const cleanLen = Math.max(2, w.replace(/[\u0591-\u05C7]/g, '').length);
+                const pauseBonus = /[,–—!?]/.test(w) ? 3.5 : 0;
+                return cleanLen + pauseBonus;
+            });
             const totalWeight = weights.reduce((a, b) => a + b, 0);
 
             let cumulative = 0;
@@ -1157,26 +1068,26 @@
             });
 
             const startTime = performance.now();
-            const effectiveDuration = totalDurationMs * 0.92;
 
-            activeKaraokeTimer = setInterval(() => {
-                const elapsed = performance.now() - startTime;
-                const progress = Math.min(1, elapsed / effectiveDuration);
+            function tick(now) {
+                if (!isAudioPlaying) return;
 
-                wordElements.forEach((el, i) => {
-                    if (progress >= thresholds[i].start && progress <= thresholds[i].end) {
-                        el.classList.add('word-highlight');
-                    } else {
-                        el.classList.remove('word-highlight');
-                    }
-                });
+                if (isBoundaryActiveFn()) return;
 
-                if (progress >= 1) {
-                    clearInterval(activeKaraokeTimer);
-                    activeKaraokeTimer = null;
-                    resetKaraokeHighlight();
+                const elapsed = now - startTime;
+                const progress = Math.min(0.99, elapsed / totalDurationMs);
+
+                const activeIdx = thresholds.findIndex(t => progress >= t.start && progress <= t.end);
+                if (activeIdx !== -1) {
+                    highlightWordAtIndex(activeIdx);
                 }
-            }, 60);
+
+                if (progress < 0.99) {
+                    activeKaraokeRaf = requestAnimationFrame(tick);
+                }
+            }
+
+            activeKaraokeRaf = requestAnimationFrame(tick);
         }
 
         function resetKaraokeHighlight() {
@@ -1195,7 +1106,6 @@
                 flipCard(false);
             }
 
-            // Update delete/restore button appearance based on active view
             const delBtn = document.getElementById('deleteCardBtn');
             const delIcon = document.getElementById('deleteCardIcon');
             const delLabel = document.getElementById('deleteCardLabel');
@@ -1241,7 +1151,6 @@
             document.getElementById('cardWhen').innerText = card.when || "בכל רגע מתאים סביב השולחן המשפחתי.";
             document.getElementById('grandmaQuote').innerText = card.quote;
 
-            // Update Bookmark icons
             const isBookmarked = userStats.bookmarks.includes(card.id);
             const bookmarkBtn = document.getElementById('bookmarkBtn');
             const bookmarkBtnBack = document.getElementById('bookmarkBtnBack');
@@ -1256,7 +1165,6 @@
                     : "text-base text-gray-400 hover:text-yiddish-gold transition";
             }
 
-            // Track learned progress
             if (!userStats.learnedIds.includes(card.id)) {
                 userStats.learnedIds.push(card.id);
                 saveStats();
@@ -1316,7 +1224,6 @@
                 }
             }
 
-            // Shuffle automatically on every load / category switch (except Deleted list)
             if (categoryName !== 'נמחקו' && filteredCards.length > 1) {
                 for (let i = filteredCards.length - 1; i > 0; i--) {
                     const j = Math.floor(Math.random() * (i + 1));
@@ -1334,18 +1241,15 @@
             if (!card) return;
 
             if (currentCategory === 'נמחקו') {
-                // Restore card from deleted list
                 userStats.deletedIds = userStats.deletedIds.filter(id => id !== card.id);
                 filteredCards = cardsData.filter(c => userStats.deletedIds.includes(c.id));
                 saveStats();
                 renderCard();
                 showToast("הקלף שוחזר חזרה לחפיסה! ♻️");
             } else {
-                // Move card to accumulated deleted list
                 if (!userStats.deletedIds.includes(card.id)) {
                     userStats.deletedIds.push(card.id);
                 }
-                // Also remove from bookmarks if it was bookmarked
                 userStats.bookmarks = userStats.bookmarks.filter(id => id !== card.id);
 
                 const activeCards = cardsData.filter(c => !userStats.deletedIds.includes(c.id));
@@ -1469,7 +1373,6 @@
         }
 
         function handleDefaultPhotoError(imgEl) {
-            // Try alternative Postimages extensions (.png / .webp) before falling back to emoji
             if (!imgEl.dataset.triedPng) {
                 imgEl.dataset.triedPng = "true";
                 const pngUrl = "https://i.postimg.cc/34FQynJq/Sara_Book_Front.png";
@@ -1486,7 +1389,6 @@
                 if (modalImg) modalImg.src = webpUrl;
                 return;
             }
-            // Fallback to emoji if network blocks external image
             imgEl.style.display = 'none';
             const fallback = document.getElementById('headerSaraFallback');
             if (fallback) fallback.style.display = 'flex';
@@ -1512,7 +1414,6 @@
             reader.onload = function(e) {
                 const img = new Image();
                 img.onload = function() {
-                    // Resize & compress slightly so it always fits comfortably in localStorage
                     const canvas = document.createElement('canvas');
                     const maxDim = 600;
                     let width = img.width;
@@ -1584,68 +1485,4 @@
 
         function setAudioLoadingState(loading) {
             const btnLabel = document.getElementById('audioBtnLabel');
-            const playIcon = document.getElementById('playIcon');
-            if (loading) {
-                btnLabel.innerText = "מכין קול...";
-                playIcon.className = "fa-solid fa-spinner fa-spin text-yiddish-gold";
-            }
-        }
-
-        function showToast(message) {
-            const toast = document.getElementById('toastMessage');
-            document.getElementById('toastText').innerText = message;
-            toast.classList.remove('hidden');
-            setTimeout(() => {
-                toast.classList.add('hidden');
-            }, 2500);
-        }
-
-        // Mobile Touch Swipe Gesture Support
-        let touchStartX = 0;
-        let touchEndX = 0;
-        const cardArea = document.getElementById('cardInner');
-
-        cardArea.addEventListener('touchstart', e => {
-            touchStartX = e.changedTouches[0].screenX;
-        }, { passive: true });
-
-        cardArea.addEventListener('touchend', e => {
-            touchEndX = e.changedTouches[0].screenX;
-            handleSwipe();
-        }, { passive: true });
-
-        function handleSwipe() {
-            const swipeDistance = touchEndX - touchStartX;
-            if (Math.abs(swipeDistance) > 40) {
-                if (swipeDistance > 0) {
-                    // Swiped Right -> Previous Card
-                    prevCard();
-                } else {
-                    // Swiped Left -> Next Card
-                    nextCard();
-                }
-            }
-        }
-
-        // Keyboard Arrow Keys Navigation
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'ArrowLeft') nextCard();
-            if (e.key === 'ArrowRight') prevCard();
-            if (e.key === ' ') {
-                e.preventDefault();
-                playAudio();
-            }
-        });
-
-        // Initialize Application
-        window.onload = () => {
-            const savedPhoto = localStorage.getItem('saraCustomPhoto');
-            if (savedPhoto) {
-                applySaraPhoto(savedPhoto);
-            }
-            saveStats();
-            filterCategory('הכל');
-        };
-    </script>
-</body>
-</html>
+            const playIcon = document.

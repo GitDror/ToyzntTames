@@ -920,9 +920,9 @@
             }, 60);
         }
 
-        function selectGrandmaVoice() {
+function selectGrandmaVoice() {
             const voices = cachedSystemVoices.length ? cachedSystemVoices : window.speechSynthesis.getVoices();
-            
+
             const isMale = (v) => /\b(asaf|danny|guy|avi|david|alon|oded|mark|male|man|boy)\b|גבר|דני|אסף|אבי|דוד/i.test(v.name);
             const isFemale = (v) => /\b(carmit|hila|maya|noa|yael|tamar|sara|zira|female|woman|girl|samantha|victoria|aria|jenny)\b|אישה|כרמית|הילה|מאיה|נועה|יעל/i.test(v.name);
 
@@ -967,10 +967,12 @@
         }
 
         function prepareLatinPhoneticForTTS(phoneticText) {
-            return phoneticText
+            const cleaned = phoneticText
                 .replace(/ch/gi, 'kh')
                 .replace(/\s–\s/g, '... ! ')
-                .trim() + '!';
+                .trim();
+
+            return /[!?]$/.test(cleaned) ? cleaned : cleaned + '!';
         }
 
         function speakYiddishDramatic(card) {
@@ -991,12 +993,14 @@
                 utterance.lang = 'en-US';
             }
 
-            utterance.rate = 1.15;
-            utterance.pitch = 0.82;
+            // קצב מתון ונינוח של אישה מבוגרת + גובה קול מאוזן
+            utterance.rate = 0.82;
+            utterance.pitch = 0.96;
             utterance.volume = 1.0;
 
-            const words = card.yiddish.split(/\s+/);
-            const estimatedDurationMs = Math.max(1600, words.length * 380);
+            const words = card.yiddish.trim().split(/\s+/);
+            const baseMsPerWord = isHebrewVoice ? 440 : 410;
+            const estimatedDurationMs = Math.max(2000, Math.round((words.length * baseMsPerWord) / utterance.rate));
             let boundaryTriggered = false;
 
             utterance.onstart = () => {
@@ -1009,8 +1013,8 @@
                 if (event.name === 'word' && isAudioPlaying) {
                     boundaryTriggered = true;
                     const textUpToChar = textToSpeak.slice(0, event.charIndex);
-                    const spokenWordsCount = textUpToChar.trim() ? textUpToChar.trim().split(/\s+/).length : 0;
-                    const targetIdx = Math.min(words.length - 1, spokenWordsCount);
+                    const spokenWordsBefore = textUpToChar.trim() ? textUpToChar.trim().split(/\s+/).length : 0;
+                    const targetIdx = Math.min(words.length - 1, spokenWordsBefore);
                     highlightWordAtIndex(targetIdx);
                 }
             };
